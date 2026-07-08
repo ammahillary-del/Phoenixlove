@@ -279,10 +279,30 @@ function distanceKm(a, b) {
   return Math.round(R * 2 * Math.atan2(Math.sqrt(s), Math.sqrt(1 - s)));
 }
 
-async function translateText(text, targetLabel = "français") {
-  // 1) Une fois déployé : passe par votre propre serveur (api/translate.js),
-  //    qui garde la vraie clé API secrète. Échoue silencieusement dans
-  //    l'aperçu Claude.ai actuel, où ce endpoint n'existe pas encore.
+// Traduction gratuite, sans clé ni compte : l'API publique MyMemory.
+// Qualité correcte pour des messages courts, largement suffisante ici.
+async function translateViaFreeService(text, sourceLangCode, targetLangCode) {
+  try {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${sourceLangCode}|${targetLangCode}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const out = data?.responseData?.translatedText;
+    if (!out || /MYMEMORY WARNING|INVALID/i.test(out)) {
+      return { ok: false, error: "Service gratuit temporairement indisponible" };
+    }
+    return { ok: true, text: out };
+  } catch {
+    return { ok: false, error: "Réseau indisponible" };
+  }
+}
+
+async function translateText(text, sourceLangCode, targetLangCode, targetLabel = "français") {
+  // 1) Gratuit, sans configuration, fonctionne dès que le site est déployé.
+  const free = await translateViaFreeService(text, sourceLangCode, targetLangCode);
+  if (free.ok) return free;
+
+  // 2) Si vous avez configuré votre propre clé Anthropic sur le serveur
+  //    (meilleure qualité, payant), ce relais prend le relais automatiquement.
   try {
     const serverRes = await fetch("/api/translate", {
       method: "POST",
@@ -292,13 +312,10 @@ async function translateText(text, targetLabel = "français") {
     if (serverRes.ok) {
       const serverData = await serverRes.json();
       if (serverData.ok) return { ok: true, text: serverData.text };
-      if (serverData.error) return { ok: false, error: serverData.error };
     }
-  } catch {
-    // pas de serveur déployé pour l'instant : on continue avec le repli ci-dessous
-  }
+  } catch { /* pas de serveur de traduction payant configuré, on continue */ }
 
-  // 2) Repli : appel direct, qui fonctionne dans l'aperçu Claude.ai.
+  // 3) Dernier repli : appel direct, qui ne fonctionne que dans l'aperçu Claude.ai.
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -320,7 +337,7 @@ async function translateText(text, targetLabel = "français") {
     if (!out) return { ok: false, error: "Réponse vide du service" };
     return { ok: true, text: out };
   } catch (e) {
-    return { ok: false, error: `Réseau indisponible (${e?.message || "inconnu"})` };
+    return { ok: false, error: free.error || `Réseau indisponible (${e?.message || "inconnu"})` };
   }
 }
 
@@ -619,7 +636,7 @@ function ChatScreen({ profile, messages, revealed, myCoords, typing, onSend, onB
           return;
         }
         setTranslating((s) => ({ ...s, [m.id]: true }));
-        translateText(m.content, targetLabel).then((res) => {
+        translateText(m.content, m.lang, targetLang, targetLabel).then((res) => {
           setTranslating((s) => ({ ...s, [m.id]: false }));
           if (res.ok) {
             setTranslations((s) => ({ ...s, [m.id]: res.text }));
@@ -644,7 +661,7 @@ function ChatScreen({ profile, messages, revealed, myCoords, typing, onSend, onB
       return;
     }
     setTranslating((s) => ({ ...s, [m.id]: true }));
-    const res = await translateText(m.content, targetLabel);
+    const res = await translateText(m.content, m.lang, targetLang, targetLabel);
     setTranslating((s) => ({ ...s, [m.id]: false }));
     if (res.ok) {
       setTranslations((s) => ({ ...s, [m.id]: res.text }));
